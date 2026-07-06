@@ -2175,6 +2175,76 @@ describe("createToolLoopHarness", () => {
     });
   });
 
+  it("emits an action.result when a parked ask_question is answered", async () => {
+    // Repro for the "ask_question spins forever" bug. A parked ask_question
+    // batch (a non-approval question request) carries emit coordinates, exactly
+    // as the harness stores when it defers an input request. When the user
+    // answers, the harness must emit an `action.result` for the question's call
+    // so consumers (e.g. the dev TUI, which flips a tool block to "done" only on
+    // that call's result) settle it. Denied approvals already emit one; before
+    // the fix an answered question emitted nothing, so its call never settled.
+    const session = setPendingInputBatch({
+      event: { sequence: 0, stepIndex: 0, turnId: "turn_0" },
+      requests: [
+        {
+          action: {
+            callId: "question-call",
+            input: { prompt: "Proceed with this plan?" },
+            kind: "tool-call",
+            toolName: "ask_question",
+          },
+          allowFreeform: false,
+          display: "select",
+          options: [
+            { id: "go", label: "Start researching" },
+            { id: "revise", label: "Adjust the plan" },
+          ],
+          prompt: "Proceed with this plan?",
+          requestId: "question-1",
+        },
+      ],
+      responseMessages: [
+        {
+          content: [
+            {
+              input: { prompt: "Proceed with this plan?" },
+              toolCallId: "question-call",
+              toolName: "ask_question",
+              type: "tool-call",
+            },
+          ],
+          role: "assistant",
+        },
+      ],
+      session: createTestSession(),
+    });
+
+    // After the answer resolves, the model simply finishes the turn.
+    setupMockAgent({
+      finishReason: "stop",
+      response: { messages: [{ content: "Thanks, starting now.", role: "assistant" }] },
+      text: "Thanks, starting now.",
+      toolCalls: [],
+      toolResults: [],
+    });
+
+    const { emit, events } = createEventCollector();
+    const runStep = createToolLoopHarness(createTestConfig("conversation", emit));
+
+    await runStep(session, {
+      inputResponses: [{ requestId: "question-1", optionId: "go" }],
+    });
+
+    // The answered question's call must appear in the emitted action.result
+    // stream. On the unfixed harness this list is empty, so the ask_question
+    // tool block never settles.
+    const settledCallIds = events
+      .filter((event) => event.type === "action.result")
+      .map((event) => (event.data.result as { callId?: string }).callId);
+
+    expect(settledCallIds).toContain("question-call");
+  });
+
   it("skips invalid runtime-action tool calls instead of parking them in the pending batch", async () => {
     setupMockAgent({
       finishReason: "tool-calls",
